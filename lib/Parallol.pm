@@ -2,7 +2,7 @@ package Parallol;
 
 use Mojo::Base -base;
 
-our $VERSION = '0.1';
+our $VERSION = '0.2';
 
 has on_done => sub { sub { } };
 
@@ -26,7 +26,21 @@ Parallol - Because parallel requests should be as fun as parallololololol!
 =head1 SYNOPSIS
 
   my $p = Parallol->new;
-  $p->do(sub {});
+  my $ua = Mojo::UserAgent->new;
+
+  my $titles = {};
+
+  $p->on_done(sub {
+    say $titles;
+  });
+
+  $ua->get('http://bbc.co.uk/', $p->do(sub {
+    $titles->{bbc} = pop->res->dom->at('title')->text;
+  }));
+
+  $ua->get('http://mojolicio.us/', $p->do(sub {
+    $titles->{mojo} = pop->res->dom->at('title')->text;
+  }));
 
 =head1 DESCRIPTION
 

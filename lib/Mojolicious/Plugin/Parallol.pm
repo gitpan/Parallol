@@ -2,25 +2,69 @@ package Mojolicious::Plugin::Parallol;
 
 use Mojo::Base 'Mojolicious::Plugin';
 use Scalar::Util 'weaken';
+use Carp;
 
 sub register {
   my ($plugin, $app) = @_;
 
-  $app->hook(before_dispatch => sub {
-    my $self = shift;
-    $self->{paralloling} = 0;
-    $self->attr(on_parallol => sub {
-      sub {
-        my $self = shift;
-        $self->render unless $self->stash('mojo.finished');
-      }
+  $app->helper(on_parallol => sub {
+    my $p = shift->stash('parallol');
+    carp "Can't call on_parallol outside of Parallol" unless $p;
+
+    # Setter.
+    return $p->{done} = shift if @_;
+
+    # Getter w/ default.
+    return $p->{done} ||= sub {
+      my $self = shift;
+      $self->render unless $self->stash('mojo.finished');
+    }
+  });
+
+  $app->hook(around_dispatch => sub {
+    my ($next, $self) = @_;
+
+    my $p = {};
+    $self->stash(parallol => $p);
+
+    # This number represents the number of pending calls (that is, calls
+    # that have been done, but the callback hasn't been called yet).
+    # Every time this number gets decremented to zero, you must also
+    # call $self->on_parallol->($self) to signal that everything is
+    # done.
+    # 
+    # This number starts at 1 because we consider the action itself a
+    # pending call.
+    $p->{paralloling} = 1;
+
+    # Call action.
+    $next->();
+
+    # If the action didn't call $self->parallol, don't do anything more.
+    return unless $p->{paralloled};
+
+    # The action is now done. As mentioned above, we must call
+    # on_parallol if there's nothing left to do.
+    return $self->on_parallol->($self) if --$p->{paralloling} == 0;
+
+    # If the IO loop is not running  ...
+    return if Mojo::IOLoop->is_running;
+
+    # ... we want to run the IO loop and stop it again when it's done.
+    my $cb = $self->on_parallol;
+    $self->on_parallol(sub {
+      $cb->(@_);
+      Mojo::IOLoop->stop;
     });
+    
+    Mojo::IOLoop->start;
   });
   
   $app->helper(
     parallol => sub {
       my $callback = pop;
       my ($self, %opts) = @_;
+      my $p = $self->stash('parallol');
 
       if (ref $callback && ref $callback eq 'CODE') {
         weaken($self) if $opts{weaken} // 1;
@@ -29,12 +73,20 @@ sub register {
         $callback = sub { $self->stash($name => pop) }
       }
 
+      # Mark the request as async and paralloled.
       $self->render_later;
-      $self->{paralloling}++;
+      $p->{paralloled} = 1;
+
+      # Increment pending calls.
+      $p->{paralloling}++;
+
 
       sub {
+        # Run the callback (and handling errors).
         eval { $callback->(@_); 1 } or $self->render_exception($@);
-        $self->on_parallol->($self) if --$self->{paralloling} == 0;
+
+        # Run on_parallol if it's finished.
+        $self->on_parallol->($self) if --$p->{paralloling} == 0;
       }
     }
   );
@@ -100,7 +152,7 @@ use a helper, we can simplify our controller quite a lot.
     $self->title('http://mojolicio.us/', $self->parallol('mojo'));
   };
 
-  helpers title => sub {
+  helper title => sub {
     my ($self, $url, $cb) = @_;
     $self->ua->get($url, sub {
       $cb->(pop->res->dom->at('title')->text);
@@ -121,6 +173,13 @@ the "done" callback:
       shift->render(template => 'something_else');
     });
   };
+
+=head3 PSGI support
+
+If the Mojo IO loop is not running, Parallol will automatically start it
+for your request, and stop it again when all callbacks have been called.
+This means that asynchronous requests just works when you use Parallol
+in servers that don't use Mojo's IO loop (PSGI).
 
 =head3 $self weakening
 
