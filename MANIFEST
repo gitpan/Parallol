@@ -1,3 +1,4 @@
+.travis.yml
 Changes
 lib/Mojolicious/Plugin/Parallol.pm
 lib/Parallol.pm
